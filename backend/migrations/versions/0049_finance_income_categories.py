@@ -28,8 +28,8 @@ Downgrading drops the table and the column, and clears the replay markers of the
 connectors that set income_kind. The rows' interest marks and the interest descriptions stay:
 the older code reads them the same way.
 
-Revision ID: 0048
-Revises: 0047
+Revision ID: 0049
+Revises: 0048
 Create Date: 2026-11-27
 """
 
@@ -37,8 +37,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0048"
-down_revision: str | None = "0047"
+revision: str = "0049"
+down_revision: str | None = "0048"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

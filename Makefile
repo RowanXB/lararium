@@ -1,4 +1,4 @@
-.PHONY: check backend-sync backend-check license-check real-check openapi openapi-check web-install web-check up down backup restore-rehearsal
+.PHONY: check backend-sync backend-check backend-static backend-test license-check real-check openapi openapi-check web-install web-check up down backup restore-rehearsal
 
 COMPOSE = docker compose -f infra/compose.yaml --env-file infra/.env
 
@@ -11,14 +11,18 @@ backend-sync:
 web-install:
 	cd web && pnpm install --frozen-lockfile
 
-backend-check: backend-sync
+backend-check: backend-static backend-test
+
+backend-static: backend-sync
 	cd backend && uv run --locked ruff check .
 	cd backend && uv run --locked ruff format --check .
 	cd backend && uv run --locked ruff check --config pyproject.toml ../tools
 	cd backend && uv run --locked ruff format --check --config pyproject.toml ../tools
 	cd backend && uv run --locked pyright
 	cd backend && uv run --locked lint-imports
-	cd backend && uv run --locked pytest -q
+
+backend-test: backend-sync
+	cd backend && uv run --locked pytest -q $(PYTEST_ARGS)
 
 # Every production dependency's licence must be compatible with AGPL-3.0-or-later, or have a
 # reviewed exception (tools/licenses.toml; README, "Dependency licences").

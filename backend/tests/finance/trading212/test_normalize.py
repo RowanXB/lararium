@@ -25,8 +25,8 @@ from lararium.core.connections import (
 )
 from lararium.core.connectors import SyncContext
 from lararium.modules.finance import connector_run
-from lararium.modules.finance.accounts import close_account, create_account
-from lararium.modules.finance.identifiers import assign_identifier
+from lararium.modules.finance.accounts import create_account
+from lararium.modules.finance.identifiers import assign_identifier, named_accounts
 from lararium.modules.finance.instruments import InstrumentIdentifier, create_instrument
 from lararium.modules.finance.ledger import (
     CounterpartyFields,
@@ -38,7 +38,6 @@ from lararium.modules.finance.ledger import (
 from lararium.modules.finance.readonly_http import loads_decimal, record_json
 from lararium.modules.finance.report_sightings import record_sighting
 from lararium.modules.finance.system_accounts import get_or_create_system_account
-from lararium.modules.finance.trading212 import accounts as t212_accounts
 from lararium.modules.finance.trading212 import instruments as t212_instruments
 from lararium.modules.finance.trading212 import sync as t212_sync
 from lararium.modules.finance.trading212.client import Trading212Client
@@ -49,7 +48,11 @@ from lararium.modules.finance.trading212.normalize import (
     Trading212DataError,
     normalize,
 )
-from lararium.modules.finance.transfers import heal_transfers, list_transfers
+from lararium.modules.finance.transfers import (
+    find_transfer_violations,
+    heal_transfers,
+    list_transfers,
+)
 from lararium.modules.finance.transfers.contra import transfer_contra
 
 from .fixtures import (
@@ -1056,7 +1059,28 @@ async def _opening(session, symbol: str):
     ).one_or_none()
 
 
-async def test_a_transfer_names_the_sibling_account(session, run) -> None:
+async def test_a_transfer_names_the_family(session, run) -> None:
+    ledger = Ledger(session, await _connection(run))
+    out = transaction_item(reference="t-out", kind="TRANSFER", amount="-100.00")
+    deposit = transaction_item(reference="d-in", kind="DEPOSIT", amount="50.00")
+    report = await ledger.normalize(SUMMARY, ("transactions", out), ("transactions", deposit))
+    # The sign is still the owner's to check.
+    assert "TRANSFER" in report.flagged
+    rows = await session.execute(
+        text(
+            "select t.external_id, i.kind, i.value from finance.transactions t"
+            " left join finance.account_identifiers i on i.id = t.counterparty_identifier_id"
+            " where t.external_id in ('transaction:t-out', 'transaction:d-in')"
+            " order by t.external_id"
+        )
+    )
+    assert [tuple(r) for r in rows] == [
+        ("transaction:d-in", None, None),
+        ("transaction:t-out", "account_family", "trading212"),
+    ]
+
+
+async def test_transfers_between_two_accounts_pair_mutually(session, run) -> None:
     invest = Ledger(session, await _connection(run, "invest"))
     isa = Ledger(session, await _connection(run, "isa"))
     await invest.normalize(SUMMARY)
@@ -1072,20 +1096,11 @@ async def test_a_transfer_names_the_sibling_account(session, run) -> None:
         ("transactions", into),
         now=later,
     )
-    # The sign is still the owner's to check.
     assert "TRANSFER" in sent.flagged and "TRANSFER" in received.flagged
-    named = await session.execute(
-        text(
-            "select t.external_id, i.value from finance.transactions t"
-            " join finance.account_identifiers i on i.id = t.counterparty_identifier_id"
-            " where t.external_id in ('transaction:t-out', 'transaction:t-in')"
-            " order by t.external_id"
-        )
-    )
-    assert [tuple(r) for r in named] == [
-        ("transaction:t-in", "10000001"),
-        ("transaction:t-out", "20000002"),
-    ]
+    assert await _named(session) == {
+        "transaction:t-out": "trading212",
+        "transaction:t-in": "trading212",
+    }
 
     async with command_context(
         session, Actor("system", "transfers"), "finance.heal_transfers", {}
@@ -1093,7 +1108,11 @@ async def test_a_transfer_names_the_sibling_account(session, run) -> None:
         await heal_transfers(ctx)
     [transfer] = await list_transfers(session)
     assert transfer.status == "matched"
-    in_transit = await session.scalar(
+    assert await _in_transit(session) == 0
+
+
+async def _in_transit(session) -> Decimal:
+    return await session.scalar(
         text(
             "select coalesce(sum(p.quantity), 0) from finance.postings p"
             " join finance.transactions t on t.id = p.transaction_id"
@@ -1101,16 +1120,6 @@ async def test_a_transfer_names_the_sibling_account(session, run) -> None:
             " where a.name = 'In transit' and t.status <> 'void'"
         )
     )
-    assert in_transit == 0
-
-
-async def test_a_transfer_without_a_sibling_names_nothing(session, run) -> None:
-    ledger = Ledger(session, await _connection(run))
-    out = transaction_item(reference="t-out", kind="TRANSFER", amount="-100.00")
-    report = await ledger.normalize(SUMMARY, ("transactions", out))
-    assert "TRANSFER" in report.flagged
-    posted = await _transaction(session, "transaction:t-out")
-    assert posted.counterparty_identifier_id is None
 
 
 async def test_an_instrument_without_metadata_is_flagged_until_typed(session, run) -> None:
@@ -1448,120 +1457,64 @@ async def _named(session) -> dict[str, str | None]:
     return {r.external_id: r.value for r in rows}
 
 
-@pytest.mark.parametrize(
-    ("stocks_isa", "cash_isa", "named"),
-    [
-        (True, None, {"transaction:t-out": "20000002", "transaction:t-in": "10000001"}),
-        (False, None, {"transaction:t-out": None}),
-        (True, "open", {"transaction:t-out": None, "transaction:t-in": None}),
-        (True, "closed", {"transaction:t-out": None, "transaction:t-in": None}),
-        (False, "open", {"transaction:t-out": None}),
-    ],
-    ids=["invest-and-stocks-isa", "invest-alone", "three", "three-one-closed", "no-t212-id"],
-)
-async def test_a_sibling_only_with_exactly_two_family_accounts(
-    session, run, stocks_isa, cash_isa, named
-) -> None:
+async def test_a_third_family_account_needs_no_replay(session, run) -> None:
     invest = Ledger(session, await _connection(run, "invest"))
-    isa = Ledger(session, await _connection(run, "isa")) if stocks_isa else None
+    isa = Ledger(session, await _connection(run, "isa"))
     isa_summary = ("summary", summary_json(account_id=20000002, cash=NO_CASH))
     await invest.normalize(SUMMARY)
-    if isa is not None:
-        await isa.normalize(isa_summary)
-    if cash_isa is not None:
-        account_id = await _cash_isa(run)
-        if cash_isa == "closed":
-            await run(lambda ctx: close_account(ctx, account_id, date(2026, 3, 2)))
-
+    await isa.normalize(isa_summary)
     moved = {"dateTime": "2026-03-04T09:15:00Z"}
     out = transaction_item(reference="t-out", kind="TRANSFER", amount="-100.00", **moved)
     into = transaction_item(reference="t-in", kind="TRANSFER", amount="100.00", **moved)
-    report = await invest.normalize(SUMMARY, ("transactions", out), now=_days(1))
-    assert "TRANSFER" in report.flagged
-    if isa is not None:
-        await isa.normalize(isa_summary, ("transactions", into), now=_days(1))
+    await invest.normalize(SUMMARY, ("transactions", out), now=_days(1))
+    await isa.normalize(isa_summary, ("transactions", into), now=_days(1))
+    named = {"transaction:t-out": "trading212", "transaction:t-in": "trading212"}
     assert await _named(session) == named
 
-
-async def _contra(session, external_id: str) -> str:
-    return await session.scalar(
-        text(
-            "select a.name from finance.postings p"
-            " join finance.transactions t on t.id = p.transaction_id"
-            " join finance.accounts a on a.id = p.account_id"
-            " where t.external_id = :e and t.status <> 'void' and p.position = 1"
-        ),
-        {"e": external_id},
-    )
-
-
-async def test_a_new_family_account_strips_the_counterpart_at_the_next_sync(session, run) -> None:
-    invest = Ledger(session, await _connection(run, "invest"))
-    isa = Ledger(session, await _connection(run, "isa"))
-    await invest.normalize(SUMMARY)
-    await isa.normalize(("summary", summary_json(account_id=20000002, cash=NO_CASH)))
-    out = transaction_item(
-        reference="t-out", kind="TRANSFER", amount="-100.00", dateTime="2026-03-04T09:15:00Z"
-    )
-    await invest.normalize(SUMMARY, ("transactions", out), now=_days(1))
-    assert await _named(session) == {"transaction:t-out": "20000002"}
-    assert await _contra(session, "transaction:t-out") == "In transit"
-    digest = (await get_connection(session, invest.connection.id)).config["family_accounts"]
-
-    # A third account of the family: the sibling is no longer the only one it can be with.
-    account_id = await _cash_isa(run)
-    report = await invest.normalize(now=_days(2))
-    assert report.replayed
-    assert (await get_connection(session, invest.connection.id)).config["family_accounts"] != (
-        digest
-    )
-    assert await _named(session) == {"transaction:t-out": None}
-    assert await _contra(session, "transaction:t-out") == "Unassigned"
-
-    assert not (await invest.normalize(now=_days(3))).replayed
-    # Its status is not the family's: closing it changes nothing.
-    await run(lambda ctx: close_account(ctx, account_id, date(2026, 3, 6)))
-    assert not (await invest.normalize(now=_days(4))).replayed
-    assert await _named(session) == {"transaction:t-out": None}
-    assert await _contra(session, "transaction:t-out") == "Unassigned"
-
-
-async def test_a_family_account_added_during_a_sync_is_replayed_at_the_next(
-    session, run, monkeypatch
-) -> None:
-    invest = Ledger(session, await _connection(run, "invest"))
-    isa = Ledger(session, await _connection(run, "isa"))
-    await invest.normalize(SUMMARY)
-    await isa.normalize(("summary", summary_json(account_id=20000002, cash=NO_CASH)))
-    out = transaction_item(
-        reference="t-out", kind="TRANSFER", amount="-100.00", dateTime="2026-03-04T09:15:00Z"
-    )
-    await invest.normalize(SUMMARY, ("transactions", out), now=_days(1))
-    assert await _named(session) == {"transaction:t-out": "20000002"}
-
-    # A Cash ISA typed by another writer after the run decided not to replay, before it reads
-    # the family it stores.
-    original = t212_accounts.account
-
-    async def account_then_cash_isa(run_, summary) -> None:
-        await original(run_, summary)
-        await create_account(
-            CommandContext(session, Actor("user", "owner"), uuid.uuid4()),
-            name="Cash ISA",
-            ledger_type="asset",
-            subtype="savings_pot",
-            balance_mode="transactions",
-            tax_wrapper="isa",
-            type_key="trading212.cash_isa",
-        )
-
-    monkeypatch.setattr(t212_accounts, "account", account_then_cash_isa)
+    # A Cash ISA typed by hand: the TRANSFERs already name the family, whoever is in it.
+    await _cash_isa(run)
     assert not (await invest.normalize(now=_days(2))).replayed
-    monkeypatch.setattr(t212_accounts, "account", original)
-    assert await _named(session) == {"transaction:t-out": "20000002"}
+    assert not (await isa.normalize(now=_days(2))).replayed
+    assert await _named(session) == named
 
-    # The digest it stored is the family it decided on: the next sync sees the change.
-    assert (await invest.normalize(now=_days(3))).replayed
+    async with command_context(
+        session, Actor("system", "transfers"), "finance.heal_transfers", {}
+    ) as ctx:
+        await heal_transfers(ctx)
+    identifier_id = await session.scalar(
+        text(
+            "select id from finance.account_identifiers"
+            " where kind = 'account_family' and value = 'trading212'"
+        )
+    )
+    invest_account = await session.scalar(
+        text("select id from finance.accounts where name = :n"), {"n": ACCOUNT}
+    )
+    # Invest's TRANSFER now names the other two accounts as a set.
+    holder, holders = await named_accounts(session, identifier_id, invest_account)
+    assert holder is None and len(holders) == 2
+    assert await find_transfer_violations(session) == []
+    assert await find_unbalanced_transactions(session) == []
+
+
+async def test_the_version_bump_replays_once(session, run) -> None:
+    ledger = Ledger(session, await _connection(run))
+    out = transaction_item(reference="t-out", kind="TRANSFER", amount="-100.00")
+    await ledger.normalize(SUMMARY, ("transactions", out))
+    # Posted by the version before: it named no one.
+    await session.execute(
+        text(
+            "update finance.transactions set counterparty_identifier_id = null"
+            " where external_id = 'transaction:t-out'"
+        )
+    )
+    await update_config(
+        CommandContext(session, CONNECTOR, uuid.uuid4()),
+        ledger.connection.id,
+        {"normalizer_version": "trading212-norm-3"},
+    )
     assert await _named(session) == {"transaction:t-out": None}
-    assert await _contra(session, "transaction:t-out") == "Unassigned"
-    assert not (await invest.normalize(now=_days(4))).replayed
+
+    assert (await ledger.normalize(now=_days(1))).replayed
+    assert await _named(session) == {"transaction:t-out": "trading212"}
+    assert not (await ledger.normalize(now=_days(2))).replayed

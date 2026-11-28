@@ -221,6 +221,14 @@ def _account(raw: dict[str, str], config: CsvProfileConfig) -> StatementAccount 
     return None if account == StatementAccount() else account
 
 
+def _family_move(raw: dict[str, str], config: CsvProfileConfig) -> bool | None:
+    """What the profile's family_notes read of the row; ValueError for Notes of another form."""
+    notes = config.family_notes
+    if notes is None:
+        return None
+    return notes.family_move(_optional(raw, config.columns.type), raw[notes.column])
+
+
 def _row(
     position: int, raw: dict[str, str], config: CsvProfileConfig, local_tz: ZoneInfo
 ) -> tuple[ParsedRow, StatementAccount | None]:
@@ -228,6 +236,7 @@ def _row(
     columns = config.columns
     when = _datetime(raw[columns.date], config, local_tz)
     extracted = _extracted(raw, config)
+    family_move = _family_move(raw, config)
     description = clean_description([raw[column] for column in columns.description])
     row = ParsedRow(
         position=position,
@@ -249,6 +258,7 @@ def _row(
         check_number=_field(raw, columns.check_number, extracted, "check_number"),
         counterparty=_counterparty(raw, config, extracted),
         started_at=_started_at(raw, config, local_tz),
+        family_move=family_move,
     )
     return row, _account(raw, config)
 
@@ -271,9 +281,9 @@ def _check_footer(
 ) -> None:
     """skip_footer_rows drops the last lines unread, so one that reads as a transaction
     means the file has no footer (an account without an overdraft line, say): refuse it
-    rather than lose that transaction. A transaction whose extract doesn't match is one
-    still, so extracts are left out here."""
-    plain = config.model_copy(update={"extract": []})
+    rather than lose that transaction. A transaction whose extract or family_notes doesn't
+    match is one still, so both are left out here."""
+    plain = config.model_copy(update={"extract": [], "family_notes": None})
     for line in footer:
         if len(line) > len(header):
             continue

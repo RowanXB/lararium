@@ -5,7 +5,7 @@ row, says so: most CSV profiles can't state interest while the PDF layouts do, s
 committed first the PDF's rows land as duplicates and carry the mark. A batch's commit or
 rollback can therefore change the kind of a transaction of another batch.
 
-Migration 0048's BACKFILL is the same rule over existing data; a migration can't import this
+Migration 0049's BACKFILL is the same rule over existing data; a migration can't import this
 module, so the two are mirrored. Change them together.
 """
 

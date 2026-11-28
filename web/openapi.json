@@ -1241,6 +1241,18 @@
         "title": "CashFlowPeriodOut",
         "type": "object"
       },
+      "CellPattern": {
+        "maxLength": 500,
+        "type": "string"
+      },
+      "CellPatterns": {
+        "items": {
+          "$ref": "#/components/schemas/CellPattern"
+        },
+        "maxItems": 10,
+        "minItems": 1,
+        "type": "array"
+      },
       "ConnectionOut": {
         "properties": {
           "binance": {
@@ -1675,6 +1687,16 @@
             "title": "Extract",
             "type": "array"
           },
+          "family_notes": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FamilyNotes"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "format": {
             "const": "csv",
             "title": "Format",
@@ -1866,6 +1888,40 @@
           "raw_records"
         ],
         "title": "EtoroUploadOut",
+        "type": "object"
+      },
+      "FamilyNotes": {
+        "additionalProperties": false,
+        "description": "Whether a row moved money within its account's family, as `column` says (account\nfamily identifier design \u00a75.9): for a row whose type (the type column's value) is one\nof `types`, a stripped cell matching one of `within` in full is a move within the\nfamily (family_move true), one matching one of `outside` a movement outside it (false),\nand any other a row error naming the column and the rule, never the value. Every other\nrow's family_move is None: the profile says nothing of it.",
+        "properties": {
+          "column": {
+            "title": "Column",
+            "type": "string"
+          },
+          "outside": {
+            "$ref": "#/components/schemas/CellPatterns"
+          },
+          "types": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Types",
+            "type": "array"
+          },
+          "within": {
+            "$ref": "#/components/schemas/CellPatterns"
+          }
+        },
+        "required": [
+          "column",
+          "types",
+          "within",
+          "outside"
+        ],
+        "title": "FamilyNotes",
         "type": "object"
       },
       "FinanceSettingsOut": {
@@ -2255,7 +2311,8 @@
               "trading212_account",
               "etoro_account",
               "card_merchant",
-              "chain_address"
+              "chain_address",
+              "account_family"
             ],
             "title": "Kind",
             "type": "string"
@@ -2783,6 +2840,17 @@
             ],
             "title": "External Id"
           },
+          "family_move": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Family Move"
+          },
           "fee": {
             "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
             "title": "Fee",
@@ -3055,6 +3123,7 @@
           "occurred_at",
           "time_unit",
           "interest",
+          "family_move",
           "value_date",
           "description",
           "payee",

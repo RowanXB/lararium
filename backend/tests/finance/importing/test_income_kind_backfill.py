@@ -1,4 +1,4 @@
-"""Migration 0048's backfill: which committed statement events get the kind `interest`."""
+"""Migration 0049's backfill: which committed statement events get the kind `interest`."""
 
 import importlib.util
 from pathlib import Path
@@ -18,7 +18,7 @@ from lararium.modules.finance.importing.profiles import (
 from .staging_helpers import HEADER, Commit, Run, Stage
 
 MIGRATION = (
-    Path(__file__).parents[3] / "migrations" / "versions" / "0048_finance_income_categories.py"
+    Path(__file__).parents[3] / "migrations" / "versions" / "0049_finance_income_categories.py"
 )
 
 THREE_ROWS = (

@@ -145,6 +145,10 @@ class Transaction(Base):
     # The source says this movement was not a transfer (a withdrawal that failed after it
     # left the balance), so it is never a transfer's leg.
     never_transfer: Mapped[bool] = mapped_column(server_default=text("false"))
+    # The source says the money went outside the account's family (a Trading 212 History
+    # CSV row whose Notes give a transaction id, account family identifier design §5.9), so
+    # it is never a family move's counterpart.
+    outside_family: Mapped[bool] = mapped_column(server_default=text("false"))
     # The amount in the source's own currency, signed like the account's posting; both or neither.
     original_quantity: Mapped[Decimal | None] = mapped_column(Numeric)
     original_instrument_id: Mapped[UUID | None] = mapped_column(
@@ -399,6 +403,9 @@ class ImportRow(Base):
     occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     time_unit: Mapped[str | None] = mapped_column(Text)
     interest: Mapped[bool] = mapped_column(server_default=text("false"))
+    # What the profile's family_notes read of the row (account family identifier design
+    # §5.9): a move within the account's family, one outside it, or NULL, nothing said.
+    family_move: Mapped[bool | None]
     occurred_tz: Mapped[str | None] = mapped_column(Text)
     description: Mapped[str] = mapped_column(Text, server_default=text("''"))
     quantity: Mapped[Decimal | None] = mapped_column(Numeric)

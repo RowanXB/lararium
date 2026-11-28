@@ -67,6 +67,9 @@ class CounterpartyFields:
     account_number: str | None = None
     # The source says it was not a transfer at all: it is never a transfer's leg.
     never_transfer: bool = False
+    # The source says the money went outside the account's family (account family
+    # identifier design §5.9): it may be a transfer, but never a family move's counterpart.
+    outside_family: bool = False
 
 
 @dataclass(frozen=True)
@@ -252,6 +255,7 @@ async def _load_transaction(session: AsyncSession, transaction_id: UUID) -> Tran
                 t.bank_transfer,
                 t.counterparty_account_number,
                 t.never_transfer,
+                t.outside_family,
                 t.original_quantity,
                 t.original_instrument_id,
                 t.category,
@@ -306,6 +310,7 @@ async def _load_transaction(session: AsyncSession, transaction_id: UUID) -> Tran
             bank_transfer=row.bank_transfer,
             account_number=row.counterparty_account_number,
             never_transfer=row.never_transfer,
+            outside_family=row.outside_family,
         ),
         postings=tuple(
             PostingRecord(
@@ -409,6 +414,8 @@ def _counterparty_data(fields: CounterpartyFields) -> dict[str, JSONValue]:
     }
     if fields.account_number is not None:
         data["account_number"] = fields.account_number
+    if fields.outside_family:
+        data["outside_family"] = True
     return data
 
 
@@ -420,6 +427,7 @@ def _counterparty_values(fields: CounterpartyFields) -> dict[str, object]:
         "bank_transfer": fields.bank_transfer,
         "counterparty_account_number": fields.account_number,
         "never_transfer": fields.never_transfer,
+        "outside_family": fields.outside_family,
     }
 
 
@@ -626,6 +634,7 @@ async def upsert_connector_transaction(
                 t.counterparty_account_number,
                 t.cancels_transaction_id,
                 t.never_transfer,
+                t.outside_family,
             ).where(t.connection_id == tx.connection_id, t.external_id == tx.external_id)
         )
     ).one_or_none()
@@ -656,6 +665,7 @@ async def upsert_connector_transaction(
         and existing.counterparty_account_number == tx.counterparty.account_number
         and existing.cancels_transaction_id == tx.cancels_transaction_id
         and existing.never_transfer == tx.counterparty.never_transfer
+        and existing.outside_family == tx.counterparty.outside_family
     )
     details_unchanged = before.details == tx.details
     # Postings compare by position: the connector emits them in a stable order.

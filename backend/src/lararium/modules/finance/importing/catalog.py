@@ -12,11 +12,13 @@ from lararium.modules.finance.importing.profiles import (
     CsvColumns,
     CsvExtract,
     CsvProfileConfig,
+    FamilyNotes,
     OfxProfileConfig,
     PdfProfileConfig,
     ProfileConfigModel,
     QifProfileConfig,
 )
+from lararium.modules.finance.trading212_notes import SENT_TO_BANK_NOTES, TRANSACTION_ID_NOTES
 
 
 @dataclass(frozen=True)
@@ -256,20 +258,21 @@ CATALOG: tuple[CatalogEntry, ...] = (
             card_types=[],
             # The export states no period; Trading 212 names it by the one chosen.
             period_from_filename=r"from_(?P<start>\d{4}-\d{2}-\d{2})_to_(?P<end>\d{4}-\d{2}-\d{2})",
-            # Notes: a deposit by bank transfer gives Trading 212's transaction id; a withdrawal
-            # the bank account it was sent to, which names the own account it went to. An
-            # internal move leaves Notes empty. Any other Notes makes the row an error, so a
-            # new form is seen rather than dropped.
+            # What a deposit's or withdrawal's Notes say (account family identifier design
+            # §5.9, owner's decision 2026-11-27): empty, a move from or to another Trading 212
+            # account; Trading 212's transaction id (a deposit by bank transfer or card), or the
+            # bank account a withdrawal was sent to, a movement outside the family. The extract
+            # reads that bank account, which names the own account it went to; Notes of any
+            # other form make the row an error, so a new form is seen rather than dropped.
             extract=[
-                CsvExtract(
-                    column="Notes",
-                    patterns=[
-                        r"Transaction ID: [0-9A-Fa-f-]+",
-                        r"Sent to Bank Account (?P<counterparty_sort_code>\d{2}-\d{2}-\d{2})"
-                        r" / (?P<counterparty_account_number>\d{8})",
-                    ],
-                )
+                CsvExtract(column="Notes", patterns=[TRANSACTION_ID_NOTES, SENT_TO_BANK_NOTES])
             ],
+            family_notes=FamilyNotes(
+                column="Notes",
+                types=["Deposit", "Withdrawal"],
+                within=[r""],
+                outside=[TRANSACTION_ID_NOTES, SENT_TO_BANK_NOTES],
+            ),
         ),
         recommended=True,
     ),
